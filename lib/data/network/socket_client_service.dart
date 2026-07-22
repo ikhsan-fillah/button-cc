@@ -46,33 +46,49 @@ class SocketClientService {
       if (_isManuallyClosed) return false;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    // Timeout habis — disconnect bersih
     disconnect();
     return false;
   }
 
   Future<void> _attemptConnect() async {
-    // Cancel subscription lama agar tidak ada dua listener sekaligus
     await _subscription?.cancel();
     _subscription = null;
+    _heartbeatTimer?.cancel();
+
+    if (_isManuallyClosed || _isKicked) return;
 
     try {
       final uri = Uri.parse('ws://$_serverIp:$_port');
-      _channel = WebSocketChannel.connect(uri);
+      final channel = WebSocketChannel.connect(uri);
+      _channel = channel;
 
-      _subscription = _channel!.stream.listen(
+      // ⭐ KUNCI FIX: tunggu handshake WebSocket benar-benar selesai
+      // sebelum pasang listener dan kirim ping.
+      // Tanpa ini, _send() di bawah terkirim ke channel yang belum ready
+      // → server terima data malformed → trigger onError → disconnect.
+      await channel.ready;
+
+      if (_isManuallyClosed || _isKicked) {
+        await channel.sink.close();
+        return;
+      }
+
+      _subscription = channel.stream.listen(
         _handleMessage,
         onDone: _handleDisconnect,
         onError: (_) => _handleDisconnect(),
         cancelOnError: false,
       );
 
-      // Ping untuk memverifikasi koneksi berhasil
+      // Kirim ping SETELAH channel.ready dan listener terpasang
       _send(SocketMessage(
         type: MessageType.ping,
         senderId: 'self',
         sequenceId: _uuid.v4(),
       ));
+    } on Exception {
+      // Handshake gagal (server belum ready, IP salah, dll)
+      _handleDisconnect();
     } catch (_) {
       _handleDisconnect();
     }
@@ -105,7 +121,7 @@ class SocketClientService {
 
         case MessageType.kicked:
           _isKicked = true;
-          _isManuallyClosed = true; // stop auto-reconnect
+          _isManuallyClosed = true;
           final reason = message.payload['reason'] as String? ??
               'Kamu dikeluarkan oleh Admin.';
           onKicked?.call(reason);
@@ -136,8 +152,7 @@ class SocketClientService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer =
-        Timer.periodic(const Duration(seconds: 5), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_isConnected) {
         _send(SocketMessage(
           type: MessageType.ping,
@@ -149,7 +164,7 @@ class SocketClientService {
   }
 
   void _handleDisconnect() {
-    if (_isKicked) return; // sudah di-handle oleh onKicked
+    if (_isKicked) return;
     final wasConnected = _isConnected;
     _cleanupConnection();
     if (wasConnected) onConnectionChanged?.call(false);
