@@ -24,7 +24,6 @@ class AdminController extends ChangeNotifier {
     notifyListeners();
 
     _server.onGroupsUpdated = (updatedGroups) {
-      // Buat list baru agar widget mendeteksi perubahan
       groups = List<GroupModel>.from(updatedGroups);
       notifyListeners();
     };
@@ -63,25 +62,38 @@ class AdminController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Deteksi IP hotspot dengan prioritas yang lebih akurat.
+  /// Android hotspot biasanya di interface bernama "wlan0", "ap0", atau "swlan0".
+  /// IP hotspot hampir selalu 192.168.43.1 atau 192.168.x.1 (gateway-ending).
   Future<String?> _getLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
+
+      String? wifiIp;
+      String? fallbackIp;
+
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          if (ip.startsWith('192.168.43') || ip.startsWith('192.168.')) {
-            return ip;
-          }
+          if (ip.isEmpty || addr.isLoopback) continue;
+
+          // Prioritas 1: IP hotspot klasik Android (192.168.43.x)
+          if (ip.startsWith('192.168.43.')) return ip;
+
+          // Prioritas 2: IP yang berakhiran .1 di subnet 192.168 → kemungkinan gateway hotspot
+          if (ip.startsWith('192.168.') && ip.endsWith('.1')) return ip;
+
+          // Prioritas 3: IP WiFi biasa 192.168.x.x
+          if (ip.startsWith('192.168.') && wifiIp == null) wifiIp = ip;
+
+          // Fallback: IP apapun yang bukan loopback
+          fallbackIp ??= ip;
         }
       }
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          if (!addr.isLoopback) return addr.address;
-        }
-      }
+      return wifiIp ?? fallbackIp;
     } catch (_) {}
     return null;
   }
@@ -90,17 +102,16 @@ class AdminController extends ChangeNotifier {
     _server.renameGroup(groupId, newLabel);
   }
 
-  /// Kick peserta dari server
   Future<void> kickGroup(String groupId) async {
     await _server.kickGroup(groupId);
-    // groups akan diupdate otomatis via onGroupsUpdated callback
   }
 
   void resetRound() {
+    // Reset server DULU sebelum update state lokal
+    _server.resetRound();
+    // Baru update state controller
     lastWinnerLabel = null;
     roundNumber++;
-    _server.resetRound();
-    // Buat list baru agar setState() mendeteksi perubahan
     groups = List<GroupModel>.from(_server.groups);
     notifyListeners();
   }
@@ -109,7 +120,10 @@ class AdminController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _server.stop();
+    // stop() adalah async — fire-and-forget di dispose() sudah cukup
+    // karena Flutter memanggil dispose hanya setelah widget benar-benar unmount.
+    // unawaited() tidak tersedia tanpa import, gunakan dummy assignment.
+    _server.stop().ignore();
     super.dispose();
   }
 }

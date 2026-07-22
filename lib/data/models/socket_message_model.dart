@@ -38,10 +38,13 @@ class SocketMessage {
         (e) => e.name == json['type'],
         orElse: () => MessageType.ack,
       ),
-      senderId: json['senderId'] as String,
-      sequenceId: json['sequenceId'] as String,
-      payload: Map<String, dynamic>.from(json['payload'] as Map? ?? {}),
-      timestamp: json['timestamp'] as int,
+      senderId: json['senderId'] as String? ?? 'unknown',
+      sequenceId: json['sequenceId'] as String? ?? '',
+      payload: Map<String, dynamic>.from(
+          (json['payload'] as Map?)?.cast<String, dynamic>() ?? {}),
+      // null-safe: server lama mungkin tidak kirim timestamp
+      timestamp: (json['timestamp'] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch,
     );
   }
 }

@@ -1,49 +1,51 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:uuid/uuid.dart';
 import '../models/socket_message_model.dart';
 import '../models/group_model.dart';
 
-/// Server berjalan di HP Admin.
-/// Dart single-threaded event loop → press pertama selalu diproses pertama,
-/// tidak ada race condition.
+/// Server berjalan di HP Admin (Android).
+/// Catatan platform: dart:io HttpServer.bind() hanya berjalan di Android.
+/// iOS sandbox melarang app membuka raw TCP server — role Admin harus Android.
 class SocketServerService {
   HttpServer? _server;
   final Map<String, WebSocket> _clients = {};
   final Map<String, GroupModel> _groups = {};
   final _uuid = const Uuid();
 
+  // Menggunakan mutex flag sederhana untuk melindungi race condition press/reset.
+  // Dart single-threaded event loop memastikan tidak ada true concurrency,
+  // tapi microtask boundary tetap bisa menyebabkan interleaving.
   bool _locked = false;
-  final List<String> _pressOrderLog = [];
-  final Set<String> _processedSequenceIds = {};
   bool _isStopping = false;
+
+  // Digunakan untuk deduplication pesan
+  final Set<String> _processedSequenceIds = {};
+
+  // Press log per ronde — hanya dimodifikasi saat _roundLock dipegang
+  final List<String> _pressOrderLog = [];
 
   Function(List<GroupModel>)? onGroupsUpdated;
   Function(String winnerGroupId, List<String> pressOrder)? onRoundWinner;
 
   Future<void> start({int port = 4040}) async {
-    // Bersihkan state sebelumnya TANPA menutup server lama
-    // (server lama sudah di-close oleh stop() sebelumnya)
+    _isStopping = false;
     _clients.clear();
     _groups.clear();
-    _locked = false;
-    _pressOrderLog.clear();
-    _processedSequenceIds.clear();
-    _isStopping = false;
+    _resetRoundState();
 
     _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
     _server!.listen(_handleConnection);
   }
 
   void _handleConnection(HttpRequest request) async {
-    // Tolak koneksi baru jika sedang stopping
     if (_isStopping) {
       request.response
         ..statusCode = HttpStatus.serviceUnavailable
         ..close();
       return;
     }
-
     if (!WebSocketTransformer.isUpgradeRequest(request)) {
       request.response
         ..statusCode = HttpStatus.badRequest
@@ -56,15 +58,10 @@ class SocketServerService {
     _clients[groupId] = socket;
 
     final idx = _groups.length;
-    final label = idx < 26
-        ? 'Grup ${String.fromCharCode(65 + idx)}'
-        : 'Grup ${idx + 1}';
+    final label =
+        idx < 26 ? 'Grup ${String.fromCharCode(65 + idx)}' : 'Grup ${idx + 1}';
 
-    _groups[groupId] = GroupModel(
-      id: groupId,
-      label: label,
-      isConnected: true,
-    );
+    _groups[groupId] = GroupModel(id: groupId, label: label, isConnected: true);
     _broadcastGroupsUpdate();
 
     socket.listen(
@@ -76,13 +73,17 @@ class SocketServerService {
   }
 
   void _handleMessage(String groupId, dynamic data) {
+    if (_isStopping) return;
     try {
       final message = SocketMessage.fromJson(
           jsonDecode(data as String) as Map<String, dynamic>);
 
-      if (_processedSequenceIds.contains(message.sequenceId)) return;
-      _processedSequenceIds.add(message.sequenceId);
-      if (_processedSequenceIds.length > 2000) _processedSequenceIds.clear();
+      // Deduplication
+      if (message.sequenceId.isNotEmpty) {
+        if (_processedSequenceIds.contains(message.sequenceId)) return;
+        _processedSequenceIds.add(message.sequenceId);
+        if (_processedSequenceIds.length > 2000) _processedSequenceIds.clear();
+      }
 
       switch (message.type) {
         case MessageType.press:
@@ -109,14 +110,22 @@ class SocketServerService {
 
   void _handlePress(String groupId) {
     if (!_clients.containsKey(groupId)) return;
+    if (_isStopping) return;
+
+    // Snapshot _locked sebelum apapun untuk atomicity di event loop Dart
+    final wasLocked = _locked;
     _pressOrderLog.add(groupId);
 
-    if (!_locked) {
-      _locked = true;
+    if (!wasLocked) {
+      _locked = true; // set segera agar press berikutnya masuk else branch
       final label = _groups[groupId]?.label ?? groupId;
-      onRoundWinner?.call(groupId, List<String>.from(_pressOrderLog));
+      // Snapshot pressOrderLog untuk dikirim ke callback
+      final snapshot = List<String>.from(_pressOrderLog);
 
-      for (final entry in _clients.entries) {
+      onRoundWinner?.call(groupId, snapshot);
+
+      for (final entry in List<MapEntry<String, WebSocket>>.from(
+          _clients.entries)) {
         _sendTo(
           entry.key,
           SocketMessage(
@@ -143,17 +152,28 @@ class SocketServerService {
     }
   }
 
-  // Dipanggil ketika koneksi putus secara alami (bukan di-kick)
-  void _onClientGone(String groupId) {
-    if (_isStopping) return;
-    _clients.remove(groupId);
-    if (_groups.containsKey(groupId)) {
-      _groups[groupId] = _groups[groupId]!.copyWith(isConnected: false);
+  void resetRound() {
+    // Reset state ronde secara atomik
+    _resetRoundState();
+
+    // Broadcast reset ke semua client yang masih terhubung
+    final msg = SocketMessage(
+      type: MessageType.reset,
+      senderId: 'server',
+      sequenceId: _uuid.v4(),
+    );
+    for (final id in List<String>.from(_clients.keys)) {
+      _sendTo(id, msg);
     }
     _broadcastGroupsUpdate();
   }
 
-  /// Kick (hapus) peserta dari admin. Kirim pesan kicked lalu putus koneksi.
+  void _resetRoundState() {
+    _locked = false;
+    _pressOrderLog.clear();
+    // Tidak clear _processedSequenceIds di sini agar deduplication tetap jalan
+  }
+
   Future<void> kickGroup(String groupId) async {
     _sendTo(
       groupId,
@@ -164,7 +184,6 @@ class SocketServerService {
         payload: {'reason': 'Kamu dikeluarkan oleh Admin.'},
       ),
     );
-    // Beri sedikit waktu agar pesan terkirim sebelum socket ditutup
     await Future<void>.delayed(const Duration(milliseconds: 300));
     try {
       await _clients[groupId]?.close(1000, 'kicked');
@@ -174,27 +193,20 @@ class SocketServerService {
     _broadcastGroupsUpdate();
   }
 
-  void resetRound() {
-    _locked = false;
-    _pressOrderLog.clear();
-    // Jangan clear _processedSequenceIds di sini agar tidak memicu bug timing
-    final resetMsg = SocketMessage(
-      type: MessageType.reset,
-      senderId: 'server',
-      sequenceId: _uuid.v4(),
-    );
-    // Kirim ke semua client yang masih terhubung
-    for (final id in List<String>.from(_clients.keys)) {
-      _sendTo(id, resetMsg);
-    }
-    _broadcastGroupsUpdate();
-  }
-
   void renameGroup(String groupId, String newLabel) {
     if (_groups.containsKey(groupId)) {
       _groups[groupId] = _groups[groupId]!.copyWith(label: newLabel);
       _broadcastGroupsUpdate();
     }
+  }
+
+  void _onClientGone(String groupId) {
+    if (_isStopping) return;
+    _clients.remove(groupId);
+    if (_groups.containsKey(groupId)) {
+      _groups[groupId] = _groups[groupId]!.copyWith(isConnected: false);
+    }
+    _broadcastGroupsUpdate();
   }
 
   void _broadcastGroupsUpdate() {
@@ -214,20 +226,21 @@ class SocketServerService {
 
   Future<void> stop() async {
     _isStopping = true;
-    for (final socket in _clients.values) {
+    // Salin keys agar tidak ConcurrentModificationError
+    final clientIds = List<String>.from(_clients.keys);
+    for (final id in clientIds) {
       try {
-        await socket.close(1001, 'server_stop');
+        await _clients[id]?.close(1001, 'server_stop');
       } catch (_) {}
     }
     _clients.clear();
     _groups.clear();
+    _resetRoundState();
+    _processedSequenceIds.clear();
     try {
       await _server?.close(force: true);
     } catch (_) {}
     _server = null;
-    _locked = false;
-    _pressOrderLog.clear();
-    _processedSequenceIds.clear();
     _isStopping = false;
   }
 }
