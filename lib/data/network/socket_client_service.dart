@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:io';
 import 'package:uuid/uuid.dart';
 import '../models/socket_message_model.dart';
 
+/// Client WebSocket menggunakan dart:io WebSocket langsung.
+/// Lebih reliable daripada web_socket_channel di Android karena:
+/// - Tidak ada layer abstraksi yang bisa fail
+/// - connect() adalah Future yang resolve tepat saat handshake selesai
+/// - Tidak ada channel.ready yang flaky
 class SocketClientService {
-  WebSocketChannel? _channel;
+  WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
   final _uuid = const Uuid();
   String? _serverIp;
@@ -25,8 +30,8 @@ class SocketClientService {
   Function()? onReset;
   Function(String reason)? onKicked;
   Function(bool connected)? onConnectionChanged;
-  // Callback baru: kirim urutan pencetan + posisi saya
-  Function(String winnerLabel, List<String> pressOrderLabels, int? myPosition)? onWinnerBroadcast;
+  Function(String winnerLabel, List<String> pressOrderLabels, int? myPosition)?
+      onWinnerBroadcast;
 
   Future<bool> connect(
     String serverIp, {
@@ -40,6 +45,7 @@ class SocketClientService {
     _hasConnectedSuccessfully = false;
     _isConnected = false;
     _reconnectAttempt = 0;
+
     await _attemptConnect();
 
     final startedAt = DateTime.now();
@@ -56,38 +62,44 @@ class SocketClientService {
     await _subscription?.cancel();
     _subscription = null;
     _heartbeatTimer?.cancel();
+    try {
+      await _socket?.close(1001, 'reconnecting');
+    } catch (_) {}
+    _socket = null;
 
     if (_isManuallyClosed || _isKicked) return;
 
     try {
-      final uri = Uri.parse('ws://$_serverIp:$_port');
-      final channel = WebSocketChannel.connect(uri);
-      _channel = channel;
-
-      await channel.ready;
+      // dart:io WebSocket.connect() resolve TEPAT saat handshake selesai.
+      // Tidak ada race condition, tidak ada channel.ready yang flaky.
+      final ws = await WebSocket.connect(
+        'ws://$_serverIp:$_port',
+      ).timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => throw TimeoutException('WebSocket connect timeout'),
+      );
 
       if (_isManuallyClosed || _isKicked) {
-        await channel.sink.close();
+        await ws.close(1001, 'cancelled');
         return;
       }
 
-      _subscription = channel.stream.listen(
+      _socket = ws;
+
+      // Pasang listener SEGERA setelah connect selesai
+      // Server akan kirim pong welcome, kita tinggal terima
+      _subscription = ws.listen(
         _handleMessage,
         onDone: _handleDisconnect,
         onError: (_) => _handleDisconnect(),
         cancelOnError: false,
       );
-
-      // Timeout: jika 5 detik tidak terima welcome pong, coba reconnect
-      Timer(const Duration(seconds: 5), () {
-        if (!_isConnected && !_isManuallyClosed && !_isKicked) {
-          _handleDisconnect();
-        }
-      });
+    } on TimeoutException {
+      _scheduleReconnect();
     } on Exception {
-      _handleDisconnect();
+      _scheduleReconnect();
     } catch (_) {
-      _handleDisconnect();
+      _scheduleReconnect();
     }
   }
 
@@ -97,27 +109,8 @@ class SocketClientService {
           jsonDecode(data as String) as Map<String, dynamic>);
 
       switch (message.type) {
-        case MessageType.winnerBroadcast:
-          final isWinner = message.payload['isWinner'] == true;
-          final winnerLabel = message.payload['winnerLabel'] as String? ?? '';
-          final rawOrder = message.payload['pressOrderLabels'];
-          final pressOrderLabels = rawOrder is List
-              ? List<String>.from(rawOrder.map((e) => e.toString()))
-              : <String>[];
-          final myPosition = message.payload['myPosition'] as int?;
-
-          // Panggil callback lengkap dengan semua info
-          onWinnerBroadcast?.call(winnerLabel, pressOrderLabels, myPosition);
-
-          // Tetap panggil onWinner / onLose untuk backward-compat UI
-          isWinner ? onWinner?.call() : onLose?.call();
-          break;
-
-        case MessageType.reset:
-          onReset?.call();
-          break;
-
         case MessageType.pong:
+          // Terima pong welcome dari server = koneksi confirmed
           if (!_isConnected) {
             _isConnected = true;
             _hasConnectedSuccessfully = true;
@@ -125,6 +118,23 @@ class SocketClientService {
             onConnectionChanged?.call(true);
             _startHeartbeat();
           }
+          break;
+
+        case MessageType.winnerBroadcast:
+          final isWinner = message.payload['isWinner'] == true;
+          final winnerLabel =
+              message.payload['winnerLabel'] as String? ?? '';
+          final rawOrder = message.payload['pressOrderLabels'];
+          final pressOrderLabels = rawOrder is List
+              ? List<String>.from(rawOrder.map((e) => e.toString()))
+              : <String>[];
+          final myPosition = message.payload['myPosition'] as int?;
+          onWinnerBroadcast?.call(winnerLabel, pressOrderLabels, myPosition);
+          isWinner ? onWinner?.call() : onLose?.call();
+          break;
+
+        case MessageType.reset:
+          onReset?.call();
           break;
 
         case MessageType.kicked:
@@ -160,7 +170,8 @@ class SocketClientService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _heartbeatTimer =
+        Timer.periodic(const Duration(seconds: 10), (_) {
       if (_isConnected) {
         _send(SocketMessage(
           type: MessageType.ping,
@@ -178,8 +189,12 @@ class SocketClientService {
     if (wasConnected) onConnectionChanged?.call(false);
     if (_isManuallyClosed) return;
     if (!_hasConnectedSuccessfully && !wasConnected) return;
-    if (_reconnectAttempt >= _maxReconnectAttempts) return;
+    _scheduleReconnect();
+  }
 
+  void _scheduleReconnect() {
+    if (_isManuallyClosed || _isKicked) return;
+    if (_reconnectAttempt >= _maxReconnectAttempts) return;
     final delaySeconds = (1 << _reconnectAttempt).clamp(1, 16);
     _reconnectAttempt++;
     _reconnectTimer?.cancel();
@@ -193,13 +208,17 @@ class SocketClientService {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     try {
-      _channel?.sink.close();
+      _socket?.close(1000, 'cleanup');
     } catch (_) {}
+    _socket = null;
   }
 
   void _send(SocketMessage message) {
     try {
-      _channel?.sink.add(jsonEncode(message.toJson()));
+      if (_socket != null &&
+          _socket!.readyState == WebSocket.open) {
+        _socket!.add(jsonEncode(message.toJson()));
+      }
     } catch (_) {}
   }
 
