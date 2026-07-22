@@ -25,6 +25,8 @@ class SocketClientService {
   Function()? onReset;
   Function(String reason)? onKicked;
   Function(bool connected)? onConnectionChanged;
+  // Callback baru: kirim urutan pencetan + posisi saya
+  Function(String winnerLabel, List<String> pressOrderLabels, int? myPosition)? onWinnerBroadcast;
 
   Future<bool> connect(
     String serverIp, {
@@ -62,7 +64,6 @@ class SocketClientService {
       final channel = WebSocketChannel.connect(uri);
       _channel = channel;
 
-      // Tunggu TCP + WebSocket handshake selesai
       await channel.ready;
 
       if (_isManuallyClosed || _isKicked) {
@@ -70,9 +71,6 @@ class SocketClientService {
         return;
       }
 
-      // Pasang listener setelah channel ready
-      // ⭐ TIDAK kirim ping lagi — server akan kirim pong/welcome otomatis
-      // saat koneksi masuk. Ini menghilangkan race condition sepenuhnya.
       _subscription = channel.stream.listen(
         _handleMessage,
         onDone: _handleDisconnect,
@@ -80,8 +78,7 @@ class SocketClientService {
         cancelOnError: false,
       );
 
-      // Timeout internal: jika dalam 5 detik tidak terima welcome pong dari server,
-      // anggap koneksi gagal dan coba reconnect
+      // Timeout: jika 5 detik tidak terima welcome pong, coba reconnect
       Timer(const Duration(seconds: 5), () {
         if (!_isConnected && !_isManuallyClosed && !_isKicked) {
           _handleDisconnect();
@@ -102,6 +99,17 @@ class SocketClientService {
       switch (message.type) {
         case MessageType.winnerBroadcast:
           final isWinner = message.payload['isWinner'] == true;
+          final winnerLabel = message.payload['winnerLabel'] as String? ?? '';
+          final rawOrder = message.payload['pressOrderLabels'];
+          final pressOrderLabels = rawOrder is List
+              ? List<String>.from(rawOrder.map((e) => e.toString()))
+              : <String>[];
+          final myPosition = message.payload['myPosition'] as int?;
+
+          // Panggil callback lengkap dengan semua info
+          onWinnerBroadcast?.call(winnerLabel, pressOrderLabels, myPosition);
+
+          // Tetap panggil onWinner / onLose untuk backward-compat UI
           isWinner ? onWinner?.call() : onLose?.call();
           break;
 
@@ -110,7 +118,6 @@ class SocketClientService {
           break;
 
         case MessageType.pong:
-          // Terima pong dari server (baik welcome maupun reply heartbeat)
           if (!_isConnected) {
             _isConnected = true;
             _hasConnectedSuccessfully = true;

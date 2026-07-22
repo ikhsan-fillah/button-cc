@@ -4,7 +4,7 @@ import '../controller/admin_controller.dart';
 import 'admin_history_screen.dart';
 
 class AdminHomeScreen extends StatefulWidget {
-  const AdminHomeScreen({super.key});
+  const AdminHomeScreen({super.key};
 
   @override
   State<AdminHomeScreen> createState() => _AdminHomeScreenState();
@@ -60,7 +60,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── IP BANNER ─────────────────────────────────────────────────────────────
   Widget _buildIpBanner() {
     final ip = _controller.serverIp;
     final isRunning = _controller.isServerRunning;
@@ -126,26 +125,43 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── BANNER PEMENANG ───────────────────────────────────────────────────────
+  // ── BANNER PEMENANG + URUTAN PENCETAN ─────────────────────────────────────
   Widget _buildWinnerBanner() {
     if (_controller.lastWinnerLabel == null) return const SizedBox.shrink();
+    final order = _controller.lastPressOrderLabels;
     return Container(
       width: double.infinity,
-      color: Colors.green,
-      padding: const EdgeInsets.all(14),
-      child: Text(
-        '🏆 Pemenang Ronde ${_controller.roundNumber - 1}: ${_controller.lastWinnerLabel}',
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 17,
-          fontWeight: FontWeight.bold,
-        ),
-        textAlign: TextAlign.center,
+      color: Colors.green.shade700,
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Text(
+            '🏆 Pemenang Ronde ${_controller.roundNumber - 1}: ${_controller.lastWinnerLabel}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          if (order.isNotEmpty) ...
+            [
+              const SizedBox(height: 6),
+              Text(
+                'Urutan: ${order.asMap().entries.map((e) => '${e.key + 1}. ${e.value}').join('  →  ')}',
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 13,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+        ],
       ),
     );
   }
 
-  // ── LIST GRUP ─────────────────────────────────────────────────────────────
   Widget _buildGroupList() {
     if (_controller.groups.isEmpty) {
       return const Center(
@@ -187,13 +203,11 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Tombol rename
               IconButton(
                 icon: const Icon(Icons.edit_outlined, size: 20),
                 tooltip: 'Ubah nama',
                 onPressed: () => _showRenameDialog(group.id, group.label),
               ),
-              // Tombol kick/hapus
               IconButton(
                 icon: const Icon(Icons.person_remove_outlined,
                     size: 20, color: Colors.red),
@@ -207,7 +221,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── TOMBOL RESET ──────────────────────────────────────────────────────────
   Widget _buildResetButton() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
@@ -216,8 +229,8 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
           _controller.resetRound();
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content:
-                  Text('Ronde ${_controller.roundNumber - 1} direset. Mulai ronde ${_controller.roundNumber}!'),
+              content: Text(
+                  'Ronde ${_controller.roundNumber - 1} direset. Mulai ronde ${_controller.roundNumber}!'),
               duration: const Duration(seconds: 2),
             ),
           );
@@ -235,7 +248,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── DIALOG RENAME ─────────────────────────────────────────────────────────
   void _showRenameDialog(String groupId, String currentLabel) {
     final ctrl = TextEditingController(text: currentLabel);
     showDialog(
@@ -266,22 +278,19 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── DIALOG KICK ───────────────────────────────────────────────────────────
   void _showKickDialog(String groupId, String label) {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Keluarkan Peserta'),
-        content: Text(
-            'Yakin ingin mengeluarkan "$label" dari sesi ini?'),
+        content: Text('Yakin ingin mengeluarkan "$label" dari sesi ini?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: const Text('Batal'),
           ),
           TextButton(
-            style:
-                TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
             onPressed: () {
               Navigator.pop(context);
               _controller.kickGroup(groupId);

@@ -16,10 +16,10 @@ class SocketServerService {
   bool _locked = false;
   bool _isStopping = false;
   final Set<String> _processedSequenceIds = {};
-  final List<String> _pressOrderLog = [];
+  final List<String> _pressOrderLog = []; // menyimpan groupId
 
   Function(List<GroupModel>)? onGroupsUpdated;
-  Function(String winnerGroupId, List<String> pressOrder)? onRoundWinner;
+  Function(String winnerGroupId, List<String> pressOrderLabels)? onRoundWinner;
 
   Future<void> start({int port = 4040}) async {
     _isStopping = false;
@@ -57,18 +57,6 @@ class SocketServerService {
     }
 
     final groupId = _uuid.v4();
-
-    // ⭐ URUTAN KRITIS:
-    // 1. Daftarkan client ke map DULU
-    // 2. Baru pasang listener
-    // 3. Kirim pong/welcome LANGSUNG — jangan tunggu ping dari client
-    //
-    // Kenapa kirim pong tanpa tunggu ping?
-    // → channel.ready di client resolve saat TCP handshake selesai di SISI CLIENT.
-    // → Tapi server baru selesai upgrade setelah await WebSocketTransformer.upgrade.
-    // → Ada jeda async di mana client sudah kirim ping tapi _clients[groupId] belum ada.
-    // → Dengan kirim pong welcome dari server, client tidak perlu kirim ping dulu.
-    // → Tidak ada race condition sama sekali.
     _clients[groupId] = socket;
 
     final idx = _groups.length;
@@ -76,7 +64,6 @@ class SocketServerService {
         idx < 26 ? 'Grup ${String.fromCharCode(65 + idx)}' : 'Grup ${idx + 1}';
     _groups[groupId] = GroupModel(id: groupId, label: label, isConnected: true);
 
-    // Pasang listener setelah client terdaftar
     socket.listen(
       (data) => _handleMessage(groupId, data),
       onDone: () => _onClientGone(groupId),
@@ -84,8 +71,7 @@ class SocketServerService {
       cancelOnError: false,
     );
 
-    // Kirim pong welcome SEGERA — client langsung tahu koneksi berhasil
-    // tanpa harus kirim ping dulu dan menunggu balasan
+    // Kirim pong welcome — client langsung tahu koneksi berhasil
     _sendTo(
       groupId,
       SocketMessage(
@@ -116,7 +102,6 @@ class SocketServerService {
           _handlePress(groupId);
           break;
         case MessageType.ping:
-          // Tetap balas ping dari heartbeat client
           _sendTo(
             groupId,
             SocketMessage(
@@ -141,15 +126,26 @@ class SocketServerService {
 
     final wasLocked = _locked;
     _pressOrderLog.add(groupId);
+    final myPosition = _pressOrderLog.length; // posisi 1-based
 
     if (!wasLocked) {
       _locked = true;
-      final label = _groups[groupId]?.label ?? groupId;
-      final snapshot = List<String>.from(_pressOrderLog);
-      onRoundWinner?.call(groupId, snapshot);
+      final winnerLabel = _groups[groupId]?.label ?? groupId;
 
+      // Buat list label urutan pencetan (bukan groupId)
+      final pressOrderLabels = _pressOrderLog
+          .map((id) => _groups[id]?.label ?? id)
+          .toList();
+
+      // Callback ke AdminController dengan label
+      onRoundWinner?.call(groupId, pressOrderLabels);
+
+      // Broadcast ke semua player dengan info lengkap
       for (final entry
           in List<MapEntry<String, WebSocket>>.from(_clients.entries)) {
+        final isWinner = entry.key == groupId;
+        // Cari posisi masing-masing client
+        final pos = _pressOrderLog.indexOf(entry.key) + 1; // 0 jika belum pencet
         _sendTo(
           entry.key,
           SocketMessage(
@@ -157,20 +153,26 @@ class SocketServerService {
             senderId: 'server',
             sequenceId: _uuid.v4(),
             payload: {
-              'isWinner': entry.key == groupId,
-              'winnerLabel': label,
+              'isWinner': isWinner,
+              'winnerLabel': winnerLabel,
+              'pressOrderLabels': pressOrderLabels,
+              'myPosition': pos > 0 ? pos : null, // null = belum pencet sama sekali
             },
           ),
         );
       }
     } else {
+      // Yang terlambat: kirim posisi mereka sekarang
       _sendTo(
         groupId,
         SocketMessage(
           type: MessageType.ack,
           senderId: 'server',
           sequenceId: _uuid.v4(),
-          payload: {'status': 'too_late'},
+          payload: {
+            'status': 'too_late',
+            'myPosition': myPosition,
+          },
         ),
       );
     }

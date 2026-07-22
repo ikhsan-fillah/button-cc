@@ -20,20 +20,14 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
     super.initState();
     _listener = () {
       if (!mounted) return;
-
-      // Tangani kicked TERPISAH dari setState menggunakan postFrameCallback
-      // agar tidak konflik dengan rebuild widget yang sedang berlangsung.
       if (widget.controller.kickedReason != null && !_kickedHandled) {
         _kickedHandled = true;
-        // setState dulu agar UI langsung berubah ke layar merah "Dikeluarkan"
         setState(() {});
-        // Baru jadwalkan dialog setelah frame selesai dirender
         SchedulerBinding.instance.addPostFrameCallback((_) {
           if (mounted) _showKickedDialog(widget.controller.kickedReason!);
         });
-        return; // jangan setState dua kali
+        return;
       }
-
       setState(() {});
     };
     widget.controller.addListener(_listener);
@@ -57,9 +51,7 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
             onPressed: () {
               Navigator.pop(context);
               Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(
-                  builder: (_) => const PlayerConnectScreen(),
-                ),
+                MaterialPageRoute(builder: (_) => const PlayerConnectScreen()),
                 (route) => false,
               );
             },
@@ -70,7 +62,6 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
     );
   }
 
-  // ── Warna tombol buzzer ────────────────────────────────────────────────────
   Color _bgColor() {
     if (widget.controller.kickedReason != null) return Colors.red.shade900;
     if (!widget.controller.isConnected) return Colors.grey.shade600;
@@ -78,7 +69,7 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
       case PlayerRoundStatus.won:
         return Colors.green.shade600;
       case PlayerRoundStatus.lost:
-        return Colors.grey.shade400;
+        return Colors.red.shade300;
       case PlayerRoundStatus.waiting:
         return Colors.orange.shade600;
       default:
@@ -86,17 +77,15 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
     }
   }
 
-  // ── Label tombol buzzer ────────────────────────────────────────────────────
   String _label() {
-    if (widget.controller.kickedReason != null) {
-      return '🚫 DIKELUARKAN\noleh Admin';
-    }
+    if (widget.controller.kickedReason != null) return '🚫 DIKELUARKAN\noleh Admin';
     if (!widget.controller.isConnected) return 'TERPUTUS\nMenghubungkan ulang...';
     switch (widget.controller.status) {
       case PlayerRoundStatus.won:
         return '🏆 KAMU TERCEPAT!';
       case PlayerRoundStatus.lost:
-        return '❌ TERLAMBAT';
+        final pos = widget.controller.myPosition;
+        return pos != null ? '❌ TERLAMBAT\nUrutan ke-$pos' : '❌ TERLAMBAT';
       case PlayerRoundStatus.waiting:
         return '⏳ MENUNGGU...';
       default:
@@ -109,7 +98,75 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
       widget.controller.kickedReason == null &&
       widget.controller.status == PlayerRoundStatus.idle;
 
-  // ── Build ──────────────────────────────────────────────────────────────────
+  // Widget urutan pencetan — ditampilkan di bawah tombol saat ronde selesai
+  Widget _buildPressOrder() {
+    final order = widget.controller.pressOrderLabels;
+    final status = widget.controller.status;
+    if (order.isEmpty) return const SizedBox.shrink();
+    if (status != PlayerRoundStatus.won && status != PlayerRoundStatus.lost) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 24, left: 24, right: 24),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Urutan Pencetan Ronde Ini:',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          ),
+          const SizedBox(height: 8),
+          ...order.asMap().entries.map((e) {
+            final no = e.key + 1;
+            final label = e.value;
+            final isMe = no == widget.controller.myPosition;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 11,
+                    backgroundColor: no == 1
+                        ? Colors.green
+                        : (isMe ? Colors.orange : Colors.grey.shade300),
+                    child: Text(
+                      '$no',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: no == 1 || isMe ? Colors.white : Colors.black54,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    label + (isMe ? '  ← Kamu' : '') + (no == 1 ? '  🏆' : ''),
+                    style: TextStyle(
+                      fontWeight: isMe ? FontWeight.bold : FontWeight.normal,
+                      color: no == 1 ? Colors.green.shade700 : Colors.black87,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isKicked = widget.controller.kickedReason != null;
@@ -118,17 +175,13 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
       backgroundColor: isKicked ? Colors.red.shade50 : Colors.grey.shade100,
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: isKicked
-            ? Colors.red.shade800
-            : (widget.controller.isConnected ? null : Colors.grey.shade700),
+        backgroundColor: isKicked ? Colors.red.shade800 : null,
         title: Row(
           children: [
             Icon(
               isKicked
                   ? Icons.person_off
-                  : (widget.controller.isConnected
-                      ? Icons.wifi
-                      : Icons.wifi_off),
+                  : (widget.controller.isConnected ? Icons.wifi : Icons.wifi_off),
               size: 18,
               color: isKicked
                   ? Colors.white
@@ -142,19 +195,16 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
               style: TextStyle(
                 color: isKicked
                     ? Colors.white
-                    : (widget.controller.isConnected
-                        ? Colors.green
-                        : Colors.red),
+                    : (widget.controller.isConnected ? Colors.green : Colors.red),
                 fontWeight: FontWeight.bold,
               ),
             ),
           ],
         ),
       ),
-      body: Center(
-        child: isKicked
-            // ── Layar Kicked ─────────────────────────────────────────────────
-            ? Column(
+      body: isKicked
+          ? Center(
+              child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.block, size: 80, color: Colors.red),
@@ -178,8 +228,7 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
                     onPressed: () {
                       Navigator.of(context).pushAndRemoveUntil(
                         MaterialPageRoute(
-                          builder: (_) => const PlayerConnectScreen(),
-                        ),
+                            builder: (_) => const PlayerConnectScreen()),
                         (route) => false,
                       );
                     },
@@ -193,41 +242,51 @@ class _PlayerBuzzerScreenState extends State<PlayerBuzzerScreen> {
                     ),
                   ),
                 ],
-              )
-            // ── Layar Buzzer Normal ───────────────────────────────────────────
-            : GestureDetector(
-                onTap: _canPress() ? widget.controller.pressButton : null,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  width: 260,
-                  height: 260,
-                  decoration: BoxDecoration(
-                    color: _bgColor(),
-                    shape: BoxShape.circle,
-                    boxShadow: _canPress()
-                        ? [
-                            BoxShadow(
-                              color: Colors.red.withOpacity(0.5),
-                              blurRadius: 30,
-                              spreadRadius: 8,
-                            )
-                          ]
-                        : [],
-                  ),
-                  child: Center(
-                    child: Text(
-                      _label(),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
+              ),
+            )
+          : SingleChildScrollView(
+              child: Column(
+                children: [
+                  const SizedBox(height: 32),
+                  Center(
+                    child: GestureDetector(
+                      onTap: _canPress() ? widget.controller.pressButton : null,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        width: 260,
+                        height: 260,
+                        decoration: BoxDecoration(
+                          color: _bgColor(),
+                          shape: BoxShape.circle,
+                          boxShadow: _canPress()
+                              ? [
+                                  BoxShadow(
+                                    color: Colors.red.withOpacity(0.5),
+                                    blurRadius: 30,
+                                    spreadRadius: 8,
+                                  )
+                                ]
+                              : [],
+                        ),
+                        child: Center(
+                          child: Text(
+                            _label(),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
                       ),
-                      textAlign: TextAlign.center,
                     ),
                   ),
-                ),
+                  _buildPressOrder(),
+                  const SizedBox(height: 32),
+                ],
               ),
-      ),
+            ),
     );
   }
 }

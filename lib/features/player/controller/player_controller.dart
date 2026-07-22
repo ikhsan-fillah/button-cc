@@ -11,20 +11,24 @@ class PlayerController extends ChangeNotifier {
 
   bool isConnected = false;
   PlayerRoundStatus status = PlayerRoundStatus.idle;
-
-  /// Diisi saat di-kick oleh admin. Null jika tidak di-kick.
   String? kickedReason;
+
+  // Info urutan pencetan — diisi saat winnerBroadcast diterima
+  String winnerLabel = '';
+  List<String> pressOrderLabels = [];
+  int? myPosition; // posisi saya (1 = tercepat), null = belum pencet
 
   Future<void> init() async {
     await _audio.init();
   }
 
   Future<bool> connectToServer(String serverIp) async {
-    // WAJIB reset kickedReason setiap kali connect ulang
-    // agar dialog kicked tidak muncul lagi di sesi berikutnya
     kickedReason = null;
     isConnected = false;
     status = PlayerRoundStatus.idle;
+    winnerLabel = '';
+    pressOrderLabels = [];
+    myPosition = null;
 
     await PermissionService.requestLocalNetworkPermission();
 
@@ -33,6 +37,14 @@ class PlayerController extends ChangeNotifier {
       if (!connected && kickedReason == null) {
         status = PlayerRoundStatus.idle;
       }
+      notifyListeners();
+    };
+
+    // Callback lengkap dengan urutan pencetan
+    _client.onWinnerBroadcast = (label, orderLabels, pos) {
+      winnerLabel = label;
+      pressOrderLabels = orderLabels;
+      myPosition = pos;
       notifyListeners();
     };
 
@@ -49,6 +61,9 @@ class PlayerController extends ChangeNotifier {
 
     _client.onReset = () {
       status = PlayerRoundStatus.idle;
+      winnerLabel = '';
+      pressOrderLabels = [];
+      myPosition = null;
       notifyListeners();
     };
 
