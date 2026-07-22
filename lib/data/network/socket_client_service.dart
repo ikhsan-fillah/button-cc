@@ -4,11 +4,6 @@ import 'dart:io';
 import 'package:uuid/uuid.dart';
 import '../models/socket_message_model.dart';
 
-/// Client WebSocket menggunakan dart:io WebSocket langsung.
-/// Lebih reliable daripada web_socket_channel di Android karena:
-/// - Tidak ada layer abstraksi yang bisa fail
-/// - connect() adalah Future yang resolve tepat saat handshake selesai
-/// - Tidak ada channel.ready yang flaky
 class SocketClientService {
   WebSocket? _socket;
   StreamSubscription<dynamic>? _subscription;
@@ -23,7 +18,7 @@ class SocketClientService {
   bool _isConnected = false;
   bool _isKicked = false;
 
-  static const int _maxReconnectAttempts = 10;
+  static const int _maxReconnectAttempts = 15;
 
   Function()? onWinner;
   Function()? onLose;
@@ -36,7 +31,7 @@ class SocketClientService {
   Future<bool> connect(
     String serverIp, {
     int port = 4040,
-    Duration timeout = const Duration(seconds: 10),
+    Duration timeout = const Duration(seconds: 12),
   }) async {
     _serverIp = serverIp;
     _port = port;
@@ -46,7 +41,7 @@ class SocketClientService {
     _isConnected = false;
     _reconnectAttempt = 0;
 
-    await _attemptConnect();
+    _attemptConnect();
 
     final startedAt = DateTime.now();
     while (DateTime.now().difference(startedAt) < timeout) {
@@ -54,6 +49,7 @@ class SocketClientService {
       if (_isManuallyClosed) return false;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
+    // Timeout habis tapi tidak connected — hentikan usaha pertama
     disconnect();
     return false;
   }
@@ -70,13 +66,9 @@ class SocketClientService {
     if (_isManuallyClosed || _isKicked) return;
 
     try {
-      // dart:io WebSocket.connect() resolve TEPAT saat handshake selesai.
-      // Tidak ada race condition, tidak ada channel.ready yang flaky.
-      final ws = await WebSocket.connect(
-        'ws://$_serverIp:$_port',
-      ).timeout(
-        const Duration(seconds: 8),
-        onTimeout: () => throw TimeoutException('WebSocket connect timeout'),
+      final ws = await WebSocket.connect('ws://$_serverIp:$_port').timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => throw TimeoutException('connect timeout'),
       );
 
       if (_isManuallyClosed || _isKicked) {
@@ -86,20 +78,26 @@ class SocketClientService {
 
       _socket = ws;
 
-      // Pasang listener SEGERA setelah connect selesai
-      // Server akan kirim pong welcome, kita tinggal terima
       _subscription = ws.listen(
         _handleMessage,
         onDone: _handleDisconnect,
         onError: (_) => _handleDisconnect(),
         cancelOnError: false,
       );
+
+      // Timeout pong: jika 6 detik setelah connect tidak terima pong welcome,
+      // anggap koneksi bermasalah dan coba reconnect
+      Timer(const Duration(seconds: 6), () {
+        if (!_isConnected && !_isManuallyClosed && !_isKicked) {
+          _handleDisconnect();
+        }
+      });
     } on TimeoutException {
-      _scheduleReconnect();
+      if (!_isManuallyClosed && !_isKicked) _scheduleReconnect();
     } on Exception {
-      _scheduleReconnect();
+      if (!_isManuallyClosed && !_isKicked) _scheduleReconnect();
     } catch (_) {
-      _scheduleReconnect();
+      if (!_isManuallyClosed && !_isKicked) _scheduleReconnect();
     }
   }
 
@@ -110,7 +108,6 @@ class SocketClientService {
 
       switch (message.type) {
         case MessageType.pong:
-          // Terima pong welcome dari server = koneksi confirmed
           if (!_isConnected) {
             _isConnected = true;
             _hasConnectedSuccessfully = true;
@@ -188,14 +185,15 @@ class SocketClientService {
     _cleanupConnection();
     if (wasConnected) onConnectionChanged?.call(false);
     if (_isManuallyClosed) return;
-    if (!_hasConnectedSuccessfully && !wasConnected) return;
+    // PERBAIKAN: selalu coba reconnect selama belum manual close / kicked
+    // tidak ada guard '!_hasConnectedSuccessfully && !wasConnected' lagi
     _scheduleReconnect();
   }
 
   void _scheduleReconnect() {
     if (_isManuallyClosed || _isKicked) return;
     if (_reconnectAttempt >= _maxReconnectAttempts) return;
-    final delaySeconds = (1 << _reconnectAttempt).clamp(1, 16);
+    final delaySeconds = (1 << _reconnectAttempt).clamp(1, 8);
     _reconnectAttempt++;
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(seconds: delaySeconds), () {
@@ -215,8 +213,7 @@ class SocketClientService {
 
   void _send(SocketMessage message) {
     try {
-      if (_socket != null &&
-          _socket!.readyState == WebSocket.open) {
+      if (_socket != null && _socket!.readyState == WebSocket.open) {
         _socket!.add(jsonEncode(message.toJson()));
       }
     } catch (_) {}
