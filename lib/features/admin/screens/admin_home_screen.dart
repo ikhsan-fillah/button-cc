@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../controller/admin_controller.dart';
+import '../../../services/permission_service.dart';
 import 'admin_history_screen.dart';
 
 class AdminHomeScreen extends StatefulWidget {
@@ -17,11 +18,18 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
   @override
   void initState() {
     super.initState();
-    _controller.startServer();
     _listener = () {
       if (mounted) setState(() {});
     };
     _controller.addListener(_listener);
+    // Minta permission dulu, baru start server
+    _initWithPermission();
+  }
+
+  Future<void> _initWithPermission() async {
+    // Tunggu permission selesai sebelum server di-bind ke port
+    await PermissionService.requestOnAppStart();
+    if (mounted) _controller.startServer();
   }
 
   @override
@@ -125,7 +133,6 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     );
   }
 
-  // ── BANNER PEMENANG + URUTAN PENCETAN ─────────────────────────────────────
   Widget _buildWinnerBanner() {
     if (_controller.lastWinnerLabel == null) return const SizedBox.shrink();
     final order = _controller.lastPressOrderLabels;
@@ -137,7 +144,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Text(
-            '🏆 Pemenang Ronde ${_controller.roundNumber - 1}: ${_controller.lastWinnerLabel}',
+            '\ud83c\udfc6 Pemenang Ronde ${_controller.roundNumber - 1}: ${_controller.lastWinnerLabel}',
             style: const TextStyle(
               color: Colors.white,
               fontSize: 17,
@@ -149,7 +156,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
             [
               const SizedBox(height: 6),
               Text(
-                'Urutan: ${order.asMap().entries.map((e) => '${e.key + 1}. ${e.value}').join('  →  ')}',
+                'Urutan: ${order.asMap().entries.map((e) => '${e.key + 1}. ${e.value}').join('  \u2192  ')}',
                 style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 13,
@@ -163,6 +170,22 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
   }
 
   Widget _buildGroupList() {
+    if (!_controller.isServerRunning) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text(
+              'Memulai server...\nMohon tunggu.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      );
+    }
     if (_controller.groups.isEmpty) {
       return const Center(
         child: Text(
@@ -194,7 +217,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
           subtitle: Text(
-            group.isConnected ? '● Terhubung' : '○ Terputus',
+            group.isConnected ? '\u25cf Terhubung' : '\u25cb Terputus',
             style: TextStyle(
               color: group.isConnected ? Colors.green : Colors.red,
               fontSize: 12,
@@ -225,16 +248,18 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: ElevatedButton.icon(
-        onPressed: () {
-          _controller.resetRound();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                  'Ronde ${_controller.roundNumber - 1} direset. Mulai ronde ${_controller.roundNumber}!'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        },
+        onPressed: !_controller.isServerRunning
+            ? null
+            : () {
+                _controller.resetRound();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        'Ronde ${_controller.roundNumber - 1} direset. Mulai ronde ${_controller.roundNumber}!'),
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
         icon: const Icon(Icons.refresh, color: Colors.white),
         label: const Text(
           'RESET RONDE / GANTI SOAL',
@@ -283,7 +308,8 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Keluarkan Peserta'),
-        content: Text('Yakin ingin mengeluarkan "$label" dari sesi ini?'),
+        content:
+            Text('Yakin ingin mengeluarkan "$label" dari sesi ini?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),

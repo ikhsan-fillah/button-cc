@@ -1,23 +1,41 @@
 import 'dart:io';
 import 'package:flutter/services.dart';
 
-/// Menangani permission runtime yang dibutuhkan app.
-/// Android 16+ (API 36+) memperkenalkan ACCESS_LOCAL_NETWORK yang wajib
-/// diminta secara runtime agar socket ke IP lokal tidak gagal diam-diam.
 class PermissionService {
   static const _channel = MethodChannel('cerdas_cermat_buzzer/permissions');
+  static bool _granted = false;
+  static bool _requested = false;
 
-  static Future<bool> requestLocalNetworkPermission() async {
-    if (!Platform.isAndroid) return true;
+  /// Dipanggil saat layar pertama dibuka (initState).
+  /// Menampilkan dialog permission sebelum user melakukan apapun.
+  static Future<bool> requestOnAppStart() async {
+    if (!Platform.isAndroid) {
+      _granted = true;
+      return true;
+    }
+    if (_granted) return true;
+    _requested = true;
     try {
-      final granted = await _channel.invokeMethod<bool>('requestLocalNetwork');
-      return granted ?? true;
+      final result = await _channel.invokeMethod<bool>('requestLocalNetwork');
+      _granted = result ?? true;
+      return _granted;
     } on MissingPluginException {
-      // Platform channel belum terdaftar (unit test / iOS)
+      _granted = true;
       return true;
     } catch (_) {
-      // Device dengan Android < 16 tidak punya permission ini, anggap aman
+      // Android < API 36: permission tidak ada, anggap granted
+      _granted = true;
       return true;
     }
   }
+
+  /// Dipakai sebelum connect/startServer — cukup return cached result.
+  static Future<bool> requestLocalNetworkPermission() async {
+    if (!Platform.isAndroid) return true;
+    if (_granted) return true;
+    return requestOnAppStart();
+  }
+
+  static bool get isGranted => _granted;
+  static bool get hasRequested => _requested;
 }
