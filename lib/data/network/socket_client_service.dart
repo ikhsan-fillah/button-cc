@@ -62,10 +62,7 @@ class SocketClientService {
       final channel = WebSocketChannel.connect(uri);
       _channel = channel;
 
-      // ⭐ KUNCI FIX: tunggu handshake WebSocket benar-benar selesai
-      // sebelum pasang listener dan kirim ping.
-      // Tanpa ini, _send() di bawah terkirim ke channel yang belum ready
-      // → server terima data malformed → trigger onError → disconnect.
+      // Tunggu TCP + WebSocket handshake selesai
       await channel.ready;
 
       if (_isManuallyClosed || _isKicked) {
@@ -73,6 +70,9 @@ class SocketClientService {
         return;
       }
 
+      // Pasang listener setelah channel ready
+      // ⭐ TIDAK kirim ping lagi — server akan kirim pong/welcome otomatis
+      // saat koneksi masuk. Ini menghilangkan race condition sepenuhnya.
       _subscription = channel.stream.listen(
         _handleMessage,
         onDone: _handleDisconnect,
@@ -80,14 +80,14 @@ class SocketClientService {
         cancelOnError: false,
       );
 
-      // Kirim ping SETELAH channel.ready dan listener terpasang
-      _send(SocketMessage(
-        type: MessageType.ping,
-        senderId: 'self',
-        sequenceId: _uuid.v4(),
-      ));
+      // Timeout internal: jika dalam 5 detik tidak terima welcome pong dari server,
+      // anggap koneksi gagal dan coba reconnect
+      Timer(const Duration(seconds: 5), () {
+        if (!_isConnected && !_isManuallyClosed && !_isKicked) {
+          _handleDisconnect();
+        }
+      });
     } on Exception {
-      // Handshake gagal (server belum ready, IP salah, dll)
       _handleDisconnect();
     } catch (_) {
       _handleDisconnect();
@@ -110,6 +110,7 @@ class SocketClientService {
           break;
 
         case MessageType.pong:
+          // Terima pong dari server (baik welcome maupun reply heartbeat)
           if (!_isConnected) {
             _isConnected = true;
             _hasConnectedSuccessfully = true;
@@ -152,7 +153,7 @@ class SocketClientService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (_isConnected) {
         _send(SocketMessage(
           type: MessageType.ping,

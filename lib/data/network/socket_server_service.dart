@@ -48,7 +48,6 @@ class SocketServerService {
     try {
       socket = await WebSocketTransformer.upgrade(request);
     } catch (_) {
-      // Upgrade gagal, abaikan
       return;
     }
 
@@ -59,13 +58,25 @@ class SocketServerService {
 
     final groupId = _uuid.v4();
 
-    // ⭐ KUNCI FIX: Pasang listener SEBELUM mendaftarkan client dan broadcast.
-    // Urutan lama: daftar client → broadcast → pasang listener
-    // Masalahnya: ada jeda async antara broadcast dan pasang listener.
-    // Jika client kirim ping di jeda itu, tidak ada handler → socket error → drop.
+    // ⭐ URUTAN KRITIS:
+    // 1. Daftarkan client ke map DULU
+    // 2. Baru pasang listener
+    // 3. Kirim pong/welcome LANGSUNG — jangan tunggu ping dari client
     //
-    // Urutan baru: pasang listener → daftar client → broadcast
-    // Listener sudah siap sebelum client tahu dirinya terdaftar.
+    // Kenapa kirim pong tanpa tunggu ping?
+    // → channel.ready di client resolve saat TCP handshake selesai di SISI CLIENT.
+    // → Tapi server baru selesai upgrade setelah await WebSocketTransformer.upgrade.
+    // → Ada jeda async di mana client sudah kirim ping tapi _clients[groupId] belum ada.
+    // → Dengan kirim pong welcome dari server, client tidak perlu kirim ping dulu.
+    // → Tidak ada race condition sama sekali.
+    _clients[groupId] = socket;
+
+    final idx = _groups.length;
+    final label =
+        idx < 26 ? 'Grup ${String.fromCharCode(65 + idx)}' : 'Grup ${idx + 1}';
+    _groups[groupId] = GroupModel(id: groupId, label: label, isConnected: true);
+
+    // Pasang listener setelah client terdaftar
     socket.listen(
       (data) => _handleMessage(groupId, data),
       onDone: () => _onClientGone(groupId),
@@ -73,12 +84,17 @@ class SocketServerService {
       cancelOnError: false,
     );
 
-    _clients[groupId] = socket;
-
-    final idx = _groups.length;
-    final label =
-        idx < 26 ? 'Grup ${String.fromCharCode(65 + idx)}' : 'Grup ${idx + 1}';
-    _groups[groupId] = GroupModel(id: groupId, label: label, isConnected: true);
+    // Kirim pong welcome SEGERA — client langsung tahu koneksi berhasil
+    // tanpa harus kirim ping dulu dan menunggu balasan
+    _sendTo(
+      groupId,
+      SocketMessage(
+        type: MessageType.pong,
+        senderId: 'server',
+        sequenceId: _uuid.v4(),
+        payload: {'welcome': true, 'label': label},
+      ),
+    );
 
     _broadcastGroupsUpdate();
   }
@@ -100,6 +116,7 @@ class SocketServerService {
           _handlePress(groupId);
           break;
         case MessageType.ping:
+          // Tetap balas ping dari heartbeat client
           _sendTo(
             groupId,
             SocketMessage(
