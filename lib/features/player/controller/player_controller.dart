@@ -11,6 +11,7 @@ class PlayerController extends ChangeNotifier {
 
   bool isConnected = false;
   PlayerRoundStatus status = PlayerRoundStatus.idle;
+  String? kickedReason;
 
   Future<void> init() async {
     await _audio.init();
@@ -21,19 +22,32 @@ class PlayerController extends ChangeNotifier {
 
     _client.onConnectionChanged = (connected) {
       isConnected = connected;
+      if (!connected && kickedReason == null) {
+        // Reset status saat koneksi putus (bukan kicked)
+        status = PlayerRoundStatus.idle;
+      }
       notifyListeners();
     };
+
     _client.onWinner = () async {
       status = PlayerRoundStatus.won;
       await _audio.playBuzzer();
       notifyListeners();
     };
+
     _client.onLose = () {
       status = PlayerRoundStatus.lost;
       notifyListeners();
     };
+
     _client.onReset = () {
       status = PlayerRoundStatus.idle;
+      notifyListeners();
+    };
+
+    _client.onKicked = (reason) {
+      kickedReason = reason;
+      isConnected = false;
       notifyListeners();
     };
 
@@ -41,7 +55,9 @@ class PlayerController extends ChangeNotifier {
   }
 
   void pressButton() {
-    if (status != PlayerRoundStatus.idle) return; // cegah double press
+    // Hanya bisa pencet jika terhubung dan status idle
+    if (!isConnected) return;
+    if (status != PlayerRoundStatus.idle) return;
     status = PlayerRoundStatus.waiting;
     notifyListeners();
     _client.sendPress();

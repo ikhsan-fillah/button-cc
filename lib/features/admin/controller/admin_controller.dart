@@ -19,13 +19,13 @@ class AdminController extends ChangeNotifier {
   Future<void> startServer() async {
     await PermissionService.requestLocalNetworkPermission();
 
-    // Ambil IP hotspot/WiFi yang aktif
     serverIp = await _getLocalIp();
     isServerRunning = false;
     notifyListeners();
 
     _server.onGroupsUpdated = (updatedGroups) {
-      groups = updatedGroups;
+      // Buat list baru agar widget mendeteksi perubahan
+      groups = List<GroupModel>.from(updatedGroups);
       notifyListeners();
     };
 
@@ -63,24 +63,20 @@ class AdminController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Ambil IP lokal aktif (WiFi hotspot biasanya 192.168.43.1)
   Future<String?> _getLocalIp() async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLoopback: false,
       );
-      // Prioritaskan interface hotspot (wlan ap) atau WiFi
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           final ip = addr.address;
-          // Hotspot Android biasanya 192.168.43.x atau 192.168.x.1
           if (ip.startsWith('192.168.43') || ip.startsWith('192.168.')) {
             return ip;
           }
         }
       }
-      // Fallback: ambil IP pertama yang bukan loopback
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (!addr.isLoopback) return addr.address;
@@ -94,10 +90,18 @@ class AdminController extends ChangeNotifier {
     _server.renameGroup(groupId, newLabel);
   }
 
+  /// Kick peserta dari server
+  Future<void> kickGroup(String groupId) async {
+    await _server.kickGroup(groupId);
+    // groups akan diupdate otomatis via onGroupsUpdated callback
+  }
+
   void resetRound() {
-    _server.resetRound();
     lastWinnerLabel = null;
     roundNumber++;
+    _server.resetRound();
+    // Buat list baru agar setState() mendeteksi perubahan
+    groups = List<GroupModel>.from(_server.groups);
     notifyListeners();
   }
 
