@@ -4,9 +4,9 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:uuid/uuid.dart';
 import '../models/socket_message_model.dart';
 
-/// Client berjalan di 4 HP Player/Grup. Terhubung ke server (HP Admin)
+/// Client berjalan di HP Player/Grup. Terhubung ke server (HP Admin)
 /// lewat hotspot lokal. Dilengkapi heartbeat + auto-reconnect dengan
-/// exponential backoff (lihat pembahasan sebelumnya soal koneksi terputus).
+/// exponential backoff.
 class SocketClientService {
   WebSocketChannel? _channel;
   final _uuid = const Uuid();
@@ -18,6 +18,8 @@ class SocketClientService {
   bool _hasConnectedSuccessfully = false;
   bool _isConnected = false;
 
+  static const int _maxReconnectAttempts = 10;
+
   Function()? onWinner;
   Function()? onLose;
   Function()? onReset;
@@ -26,7 +28,7 @@ class SocketClientService {
   Future<bool> connect(
     String serverIp, {
     int port = 4040,
-    Duration timeout = const Duration(seconds: 5),
+    Duration timeout = const Duration(seconds: 10),
   }) async {
     _serverIp = serverIp;
     _port = port;
@@ -40,7 +42,7 @@ class SocketClientService {
     while (DateTime.now().difference(startedAt) < timeout) {
       if (_isConnected) return true;
       if (_isManuallyClosed) return false;
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
     }
     disconnect();
     return false;
@@ -48,14 +50,17 @@ class SocketClientService {
 
   Future<void> _attemptConnect() async {
     try {
-      _channel = WebSocketChannel.connect(Uri.parse('ws://$_serverIp:$_port'));
+      final uri = Uri.parse('ws://$_serverIp:$_port');
+      _channel = WebSocketChannel.connect(uri);
 
+      // Langsung tandai connecting dan kirim ping
       _channel!.stream.listen(
         _handleMessage,
         onDone: _handleDisconnect,
         onError: (_) => _handleDisconnect(),
       );
 
+      // Kirim ping untuk memverifikasi koneksi
       _send(
         SocketMessage(
           type: MessageType.ping,
@@ -69,7 +74,7 @@ class SocketClientService {
   }
 
   void _handleMessage(dynamic data) {
-    final message = SocketMessage.fromJson(jsonDecode(data));
+    final message = SocketMessage.fromJson(jsonDecode(data as String));
     switch (message.type) {
       case MessageType.winnerBroadcast:
         final isWinner = message.payload['isWinner'] == true;
@@ -86,7 +91,7 @@ class SocketClientService {
           onConnectionChanged?.call(true);
           _startHeartbeat();
         }
-        break; // heartbeat OK
+        break;
       default:
         break;
     }
@@ -114,7 +119,7 @@ class SocketClientService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _send(
         SocketMessage(
           type: MessageType.ping,
@@ -128,13 +133,13 @@ class SocketClientService {
   void _handleDisconnect() {
     final wasConnected = _isConnected;
     _isConnected = false;
-    onConnectionChanged?.call(false);
+    if (wasConnected) onConnectionChanged?.call(false);
     _heartbeatTimer?.cancel();
     if (_isManuallyClosed) return;
 
-    if (!_hasConnectedSuccessfully && !wasConnected) {
-      return;
-    }
+    if (!_hasConnectedSuccessfully && !wasConnected) return;
+
+    if (_reconnectAttempt >= _maxReconnectAttempts) return;
 
     // Exponential backoff: 1s, 2s, 4s, 8s... maksimal 16s
     final delaySeconds = (1 << _reconnectAttempt).clamp(1, 16);
@@ -145,7 +150,9 @@ class SocketClientService {
   }
 
   void _send(SocketMessage message) {
-    _channel?.sink.add(jsonEncode(message.toJson()));
+    try {
+      _channel?.sink.add(jsonEncode(message.toJson()));
+    } catch (_) {}
   }
 
   void disconnect() {
