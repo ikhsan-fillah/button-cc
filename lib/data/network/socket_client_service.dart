@@ -18,6 +18,11 @@ class SocketClientService {
   bool _isConnected = false;
   bool _isKicked = false;
 
+  /// Timestamp terakhir kali client dapat pong dari server.
+  /// Dipakai heartbeat untuk deteksi half-open TCP connection:
+  /// kalau >12 detik tidak ada pong, anggap koneksi mati dan reconnect.
+  DateTime? _lastPongAt;
+
   static const int _maxReconnectAttempts = 15;
 
   Function()? onWinner;
@@ -49,7 +54,6 @@ class SocketClientService {
       if (_isManuallyClosed) return false;
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    // Timeout habis tapi tidak connected — hentikan usaha pertama
     disconnect();
     return false;
   }
@@ -85,8 +89,8 @@ class SocketClientService {
         cancelOnError: false,
       );
 
-      // Timeout pong: jika 6 detik setelah connect tidak terima pong welcome,
-      // anggap koneksi bermasalah dan coba reconnect
+      // Timeout pong welcome: jika 6 detik setelah TCP connect tidak terima
+      // pong sama sekali, anggap koneksi bermasalah dan coba reconnect.
       Timer(const Duration(seconds: 6), () {
         if (!_isConnected && !_isManuallyClosed && !_isKicked) {
           _handleDisconnect();
@@ -108,6 +112,10 @@ class SocketClientService {
 
       switch (message.type) {
         case MessageType.pong:
+          // Update timestamp SETIAP kali pong diterima (welcome maupun
+          // balasan heartbeat) — ini yang bikin heartbeat bisa deteksi
+          // half-open connection secara aktif.
+          _lastPongAt = DateTime.now();
           if (!_isConnected) {
             _isConnected = true;
             _hasConnectedSuccessfully = true;
@@ -167,15 +175,29 @@ class SocketClientService {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer =
-        Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_isConnected) {
-        _send(SocketMessage(
-          type: MessageType.ping,
-          senderId: 'self',
-          sequenceId: _uuid.v4(),
-        ));
+    // Set _lastPongAt ke sekarang saat heartbeat mulai, biar tidak langsung
+    // dianggap timeout di iterasi pertama.
+    _lastPongAt = DateTime.now();
+
+    // Cek tiap 5 detik.
+    // Kalau sudah >12 detik tidak ada pong balik → koneksi dianggap mati.
+    // Ini menangani "half-open TCP" di mana server sudah tutup koneksi tapi
+    // onDone/onError tidak terpanggil di sisi client (lazim di Android hotspot).
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!_isConnected) return;
+
+      final sinceLastPong = DateTime.now().difference(_lastPongAt!);
+      if (sinceLastPong > const Duration(seconds: 12)) {
+        // Koneksi diam-diam sudah mati → paksa disconnect & reconnect
+        _handleDisconnect();
+        return;
       }
+
+      _send(SocketMessage(
+        type: MessageType.ping,
+        senderId: 'self',
+        sequenceId: _uuid.v4(),
+      ));
     });
   }
 
@@ -185,8 +207,6 @@ class SocketClientService {
     _cleanupConnection();
     if (wasConnected) onConnectionChanged?.call(false);
     if (_isManuallyClosed) return;
-    // PERBAIKAN: selalu coba reconnect selama belum manual close / kicked
-    // tidak ada guard '!_hasConnectedSuccessfully && !wasConnected' lagi
     _scheduleReconnect();
   }
 
