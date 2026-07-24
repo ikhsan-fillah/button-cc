@@ -5,8 +5,6 @@ import 'package:uuid/uuid.dart';
 import '../models/socket_message_model.dart';
 import '../models/group_model.dart';
 
-/// Server berjalan di HP Admin (Android).
-/// iOS sandbox melarang app membuka raw TCP server — role Admin harus Android.
 class SocketServerService {
   HttpServer? _server;
   final Map<String, WebSocket> _clients = {};
@@ -16,7 +14,7 @@ class SocketServerService {
   bool _locked = false;
   bool _isStopping = false;
   final Set<String> _processedSequenceIds = {};
-  final List<String> _pressOrderLog = []; // menyimpan groupId
+  final List<String> _pressOrderLog = [];
 
   Function(List<GroupModel>)? onGroupsUpdated;
   Function(String winnerGroupId, List<String> pressOrderLabels)? onRoundWinner;
@@ -27,10 +25,13 @@ class SocketServerService {
     _groups.clear();
     _resetRoundState();
     _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+    print('[SERVER] Listening on port $port');
     _server!.listen(_handleConnection);
   }
 
   void _handleConnection(HttpRequest request) async {
+    print('[SERVER] Incoming connection from ${request.connectionInfo?.remoteAddress.address}');
+
     if (_isStopping) {
       request.response
         ..statusCode = HttpStatus.serviceUnavailable
@@ -38,6 +39,7 @@ class SocketServerService {
       return;
     }
     if (!WebSocketTransformer.isUpgradeRequest(request)) {
+      print('[SERVER] Not a WebSocket upgrade request — rejected');
       request.response
         ..statusCode = HttpStatus.badRequest
         ..close();
@@ -47,7 +49,9 @@ class SocketServerService {
     WebSocket socket;
     try {
       socket = await WebSocketTransformer.upgrade(request);
-    } catch (_) {
+      print('[SERVER] WebSocket upgrade OK, readyState=${socket.readyState}');
+    } catch (e) {
+      print('[SERVER] WebSocket upgrade FAILED: $e');
       return;
     }
 
@@ -63,15 +67,27 @@ class SocketServerService {
     final label =
         idx < 26 ? 'Grup ${String.fromCharCode(65 + idx)}' : 'Grup ${idx + 1}';
     _groups[groupId] = GroupModel(id: groupId, label: label, isConnected: true);
+    print('[SERVER] Registered $label (id=$groupId)');
 
     socket.listen(
       (data) => _handleMessage(groupId, data),
-      onDone: () => _onClientGone(groupId),
-      onError: (_) => _onClientGone(groupId),
+      onDone: () {
+        print('[SERVER] onDone for $label — socket closed by remote or OS');
+        _onClientGone(groupId);
+      },
+      onError: (e) {
+        print('[SERVER] onError for $label: $e');
+        _onClientGone(groupId);
+      },
       cancelOnError: false,
     );
 
-    // Kirim pong welcome — client langsung tahu koneksi berhasil
+    // Tunda 100ms sebelum kirim pong welcome.
+    // Beberapa Android: readyState masih CONNECTING tepat setelah upgrade(),
+    // socket.add() langsung throw StateError -> onDone terpanggil -> disconnect.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+
+    print('[SERVER] Sending welcome pong to $label, readyState=${socket.readyState}');
     _sendTo(
       groupId,
       SocketMessage(
@@ -117,7 +133,9 @@ class SocketServerService {
         default:
           break;
       }
-    } catch (_) {}
+    } catch (e) {
+      print('[SERVER] _handleMessage error: $e');
+    }
   }
 
   void _handlePress(String groupId) {
@@ -126,26 +144,21 @@ class SocketServerService {
 
     final wasLocked = _locked;
     _pressOrderLog.add(groupId);
-    final myPosition = _pressOrderLog.length; // posisi 1-based
+    final myPosition = _pressOrderLog.length;
 
     if (!wasLocked) {
       _locked = true;
       final winnerLabel = _groups[groupId]?.label ?? groupId;
-
-      // Buat list label urutan pencetan (bukan groupId)
       final pressOrderLabels = _pressOrderLog
           .map((id) => _groups[id]?.label ?? id)
           .toList();
 
-      // Callback ke AdminController dengan label
       onRoundWinner?.call(groupId, pressOrderLabels);
 
-      // Broadcast ke semua player dengan info lengkap
       for (final entry
           in List<MapEntry<String, WebSocket>>.from(_clients.entries)) {
         final isWinner = entry.key == groupId;
-        // Cari posisi masing-masing client
-        final pos = _pressOrderLog.indexOf(entry.key) + 1; // 0 jika belum pencet
+        final pos = _pressOrderLog.indexOf(entry.key) + 1;
         _sendTo(
           entry.key,
           SocketMessage(
@@ -156,13 +169,12 @@ class SocketServerService {
               'isWinner': isWinner,
               'winnerLabel': winnerLabel,
               'pressOrderLabels': pressOrderLabels,
-              'myPosition': pos > 0 ? pos : null, // null = belum pencet sama sekali
+              'myPosition': pos > 0 ? pos : null,
             },
           ),
         );
       }
     } else {
-      // Yang terlambat: kirim posisi mereka sekarang
       _sendTo(
         groupId,
         SocketMessage(
@@ -224,6 +236,8 @@ class SocketServerService {
 
   void _onClientGone(String groupId) {
     if (_isStopping) return;
+    final label = _groups[groupId]?.label ?? groupId;
+    print('[SERVER] _onClientGone: $label removed from active clients');
     _clients.remove(groupId);
     if (_groups.containsKey(groupId)) {
       _groups[groupId] = _groups[groupId]!.copyWith(isConnected: false);
@@ -238,10 +252,19 @@ class SocketServerService {
   void _sendTo(String groupId, SocketMessage message) {
     try {
       final socket = _clients[groupId];
-      if (socket != null && socket.readyState == WebSocket.open) {
-        socket.add(jsonEncode(message.toJson()));
+      if (socket == null) {
+        print('[SERVER] _sendTo: socket null for $groupId');
+        return;
       }
-    } catch (_) {}
+      print('[SERVER] _sendTo ${_groups[groupId]?.label}: readyState=${socket.readyState}, type=${message.type.name}');
+      if (socket.readyState == WebSocket.open) {
+        socket.add(jsonEncode(message.toJson()));
+      } else {
+        print('[SERVER] _sendTo SKIP: socket not open (state=${socket.readyState})');
+      }
+    } catch (e) {
+      print('[SERVER] _sendTo ERROR: $e');
+    }
   }
 
   List<GroupModel> get groups => List<GroupModel>.from(_groups.values);
@@ -263,5 +286,6 @@ class SocketServerService {
     } catch (_) {}
     _server = null;
     _isStopping = false;
+    print('[SERVER] Stopped.');
   }
 }
